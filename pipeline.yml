@@ -1,16 +1,16 @@
 schedules:
   - cron: "0 4 * * *"
-    displayName: "Every day at 4 AM"
+    displayName: "Daily at 4 AM"
     always: true
     branches:
       include:
         - main
 
 variables:
-  - group: ApiKeys
+  - group: Vars
 
 jobs:
-  - job: sync_to_radarr
+  - job: sync
     displayName: Sync Letterboxd to Radarr
     pool:
       vmImage: "ubuntu-latest"
@@ -21,10 +21,8 @@ jobs:
           versionSpec: "18.x"
         displayName: "Install Node.js"
 
-      - script: |
-          npm install
-        displayName: "Install Dependencies"
+      - script: npm install
+        displayName: "Install dependencies"
 
-      - script: |
-          node run.js
-        displayName: "Run Sync Script"
+      - script: node run.js
+        displayName: "Run letterboxd-to-radarr sync"
