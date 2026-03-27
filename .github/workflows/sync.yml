@@ -1,0 +1,28 @@
+name: Sync Letterboxd to Radarr
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run sync
+        run: node run.js
+        env:
+          RADARR_URL: ${{ secrets.RADARR_URL }}
+          RADARR_API_KEY: ${{ secrets.RADARR_API_KEY }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          RADARR_ROOT: ${{ secrets.RADARR_ROOT }}
+          LETTERBOXD_USERS: ${{ secrets.LETTERBOXD_USERS }}
