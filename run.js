@@ -59,12 +59,12 @@ function updateLog(section, entry) {
 async function fetchLetterboxdWatchlist(username) {
   console.log(`\n🎬 Fetching watchlist for ${username}...`);
   const baseUrl = `https://letterboxd.com/${username}/watchlist`;
-  const slugs = [];
+  // Each item now stores { name, letterboxdFilmId, slug }
+  const films = [];
 
   const firstRes = await fetch(`${baseUrl}/`);
   const firstHtml = await firstRes.text();
   const $first = cheerio.load(firstHtml);
-
   const lastPage = parseInt($first("li.paginate-page").last().text()) || 1;
 
   for (let page = 1; page <= lastPage; page++) {
@@ -73,35 +73,70 @@ async function fetchLetterboxdWatchlist(username) {
     const html = await res.text();
     const $ = cheerio.load(html);
 
-    $(".poster-list .film-poster").each((_, el) => {
-      const slug = $(el).attr("data-film-slug");
-      if (slug) slugs.push(slug.replace(/-/g, " "));
+    $(".react-component[data-film-id]").each((_, el) => {
+      const filmId = $(el).attr("data-film-id");
+      const name = $(el).attr("data-item-name");
+      const slug = $(el).attr("data-item-slug");
+      if (filmId && name) {
+        films.push({ name, letterboxdFilmId: filmId, slug });
+      }
     });
 
     console.log(
-      `📄 Page ${page}/${lastPage} — ${slugs.length} movies total so far`
+      `📄 Page ${page}/${lastPage} — ${films.length} movies total so far`
     );
   }
 
-  return slugs;
+  return films;
 }
 
-function cleanTitle(rawTitle) {
-  return rawTitle
-    .replace(/\b(19|20)\d{2}\b/g, "") // remove 4-digit years
-    .replace(/\b\d{1,2}\b/g, "") // remove single or double-digit numbers
-    .replace(/\s+/g, " ") // collapse multiple spaces
-    .trim(); // remove leading/trailing space
+async function getTmdbIdFromLetterboxd(slug) {
+  // Letterboxd film pages embed TMDB ID in their JSON endpoint
+  try {
+    const res = await fetch(`https://letterboxd.com/film/${slug}/json/`);
+    const json = await res.json();
+    // Look for tmdb link
+    if (json.externalLinks) {
+      const tmdbLink = json.externalLinks.find(
+        (l) => l.type === "tmdb" || (l.url && l.url.includes("themoviedb"))
+      );
+      if (tmdbLink) {
+        const match = tmdbLink.url.match(/movie\/(\d+)/);
+        if (match) return parseInt(match[1]);
+      }
+    }
+  } catch (err) {
+    // fall through to title search
+  }
+  return null;
 }
 
-async function searchTmdb(title) {
+async function searchTmdbByTitle(title) {
+  // Strip year from title like "Drunken Master (1978)" -> "Drunken Master"
+  const cleanTitle = title.replace(/\s*\(\d{4}\)\s*$/, "").trim();
   const res = await fetch(
     `https://api.themoviedb.org/3/search/movie?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(
-      title
+      cleanTitle
     )}`
   );
   const json = await res.json();
   return json.results?.[0] || null;
+}
+
+async function getTmdbMovie(film) {
+  // First try to get TMDB ID from Letterboxd's JSON endpoint
+  const tmdbId = await getTmdbIdFromLetterboxd(film.slug);
+  if (tmdbId) {
+    const res = await fetch(
+      `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}`
+    );
+    if (res.ok) {
+      const movie = await res.json();
+      return movie;
+    }
+  }
+  // Fall back to title search
+  return await searchTmdbByTitle(film.name);
 }
 
 async function getRadarrMovies() {
@@ -159,9 +194,11 @@ async function addToRadarr(movie) {
       errorParsed.some((e) => e.errorCode === "MovieExistsValidator");
 
     if (isDuplicate) {
-      // Don’t log already-added movies
       return;
     }
+
+    console.error(`❌ Failed to add "${movie.title}": ${errorText}`);
+
     if (!isCi) {
       updateLog("radarrFailures", {
         title: movie.title,
@@ -170,32 +207,37 @@ async function addToRadarr(movie) {
         error: errorText,
       });
     }
+  } else {
+    console.log(`✅ Added "${movie.title}" to Radarr`);
   }
 }
 
 (async () => {
   const existing = await getRadarrMovies();
+  const existingTmdbIds = new Set(existing.map((m) => m.tmdbId));
 
   for (const user of letterboxdUsers) {
-    const titles = await fetchLetterboxdWatchlist(user);
-    for (const title of titles) {
-      if (existing.some((m) => m.title.toLowerCase() === title.toLowerCase())) {
+    const films = await fetchLetterboxdWatchlist(user.trim());
+    for (const film of films) {
+      const movie = await getTmdbMovie(film);
+
+      if (!movie) {
+        console.warn(`⚠️ Not found on TMDB: ${film.name}`);
+        if (!isCi) {
+          updateLog("notFoundOnTmdb", film.name);
+        }
         continue;
       }
 
-      const cleanedTitle = cleanTitle(title);
-      const movie = await searchTmdb(cleanedTitle);
-
-      if (movie) {
-        await addToRadarr(movie);
-      } else if (!isCi) {
-        {
-          updateLog(
-            "notFoundOnTmdb",
-            `${title} (cleaned as "${cleanedTitle}")`
-          );
-        }
+      if (existingTmdbIds.has(movie.id)) {
+        console.log(`⏭️ Already in Radarr: ${movie.title}`);
+        continue;
       }
+
+      await addToRadarr(movie);
+      existingTmdbIds.add(movie.id);
     }
   }
+
+  console.log("\n✅ Sync complete!");
 })();
