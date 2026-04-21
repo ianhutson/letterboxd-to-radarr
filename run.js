@@ -17,8 +17,8 @@ fs.writeFileSync(
       radarrFailures: [],
     },
     null,
-    2
-  )
+    2,
+  ),
 );
 
 const RADARR_URL = process.env.RADARR_URL;
@@ -73,17 +73,31 @@ async function fetchLetterboxdWatchlist(username) {
     const html = await res.text();
     const $ = cheerio.load(html);
 
-    $(".react-component[data-film-id]").each((_, el) => {
-      const filmId = $(el).attr("data-film-id");
+    $(
+      '.react-component[data-component-class="LazyPoster"][data-item-slug]',
+    ).each((_, el) => {
       const name = $(el).attr("data-item-name");
       const slug = $(el).attr("data-item-slug");
-      if (filmId && name) {
+
+      let filmId = null;
+      const identifierJson = $(el).attr("data-postered-identifier");
+      if (identifierJson) {
+        try {
+          const parsed = JSON.parse(identifierJson);
+          // parsed.uid looks like "film:45479"
+          if (parsed.uid && parsed.uid.startsWith("film:")) {
+            filmId = parsed.uid.split(":")[1];
+          }
+        } catch {}
+      }
+
+      if (name && slug) {
         films.push({ name, letterboxdFilmId: filmId, slug });
       }
     });
 
     console.log(
-      `📄 Page ${page}/${lastPage} — ${films.length} movies total so far`
+      `📄 Page ${page}/${lastPage} — ${films.length} movies total so far`,
     );
   }
 
@@ -98,7 +112,7 @@ async function getTmdbIdFromLetterboxd(slug) {
     // Look for tmdb link
     if (json.externalLinks) {
       const tmdbLink = json.externalLinks.find(
-        (l) => l.type === "tmdb" || (l.url && l.url.includes("themoviedb"))
+        (l) => l.type === "tmdb" || (l.url && l.url.includes("themoviedb")),
       );
       if (tmdbLink) {
         const match = tmdbLink.url.match(/movie\/(\d+)/);
@@ -116,8 +130,8 @@ async function searchTmdbByTitle(title) {
   const cleanTitle = title.replace(/\s*\(\d{4}\)\s*$/, "").trim();
   const res = await fetch(
     `https://api.themoviedb.org/3/search/movie?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(
-      cleanTitle
-    )}`
+      cleanTitle,
+    )}`,
   );
   const json = await res.json();
   return json.results?.[0] || null;
@@ -128,7 +142,7 @@ async function getTmdbMovie(film) {
   const tmdbId = await getTmdbIdFromLetterboxd(film.slug);
   if (tmdbId) {
     const res = await fetch(
-      `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}`
+      `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}`,
     );
     if (res.ok) {
       const movie = await res.json();
