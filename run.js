@@ -153,6 +153,18 @@ async function getTmdbMovie(film) {
   return await searchTmdbByTitle(film.name);
 }
 
+async function getRadarrExclusions() {
+  const res = await fetch(`${RADARR_URL}/api/v3/exclusions`, {
+    headers: { "X-Api-Key": RADARR_API_KEY },
+  });
+  try {
+    return await res.json();
+  } catch (err) {
+    console.error("❌ Failed to parse Radarr exclusions JSON:", err.message);
+    return [];
+  }
+}
+
 async function getRadarrMovies() {
   const res = await fetch(`${RADARR_URL}/api/v3/movie`, {
     headers: { "X-Api-Key": RADARR_API_KEY },
@@ -229,6 +241,8 @@ async function addToRadarr(movie) {
 (async () => {
   const existing = await getRadarrMovies();
   const existingTmdbIds = new Set(existing.map((m) => m.tmdbId));
+  const exclusions = await getRadarrExclusions();                        // NEW
+  const excludedTmdbIds = new Set(exclusions.map((e) => e.tmdbId));      // NEW
 
   for (const user of letterboxdUsers) {
     const films = await fetchLetterboxdWatchlist(user.trim());
@@ -241,6 +255,11 @@ async function addToRadarr(movie) {
           updateLog("notFoundOnTmdb", film.name);
         }
         continue;
+      }
+
+      if (excludedTmdbIds.has(movie.id)) {                               // NEW
+        console.log(`🚫 Skipping (removed on purpose): ${movie.title}`); // NEW
+        continue;                                                        // NEW
       }
 
       if (existingTmdbIds.has(movie.id)) {
