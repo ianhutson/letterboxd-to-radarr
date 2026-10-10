@@ -31,14 +31,17 @@ const RADARR_ROOT = process.env.RADARR_ROOT;
 // them gets removed (along with its files), unless protected (see below).
 const LETTERBOXD_USERS = ["ayygux", "yanhut", "vinceguckin"];
 
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+ 
 // Safety switches
 // DRY_RUN=true        -> log what would be removed, delete nothing
 // MAX_DELETIONS=N     -> refuse to delete if more than N movies would go (default 25)
 // RADARR_KEEP_TAG=xyz -> movies with this Radarr tag are never removed (default "keep")
 const DRY_RUN = process.env.DRY_RUN === "true";
-const MAX_DELETIONS = parseInt(process.env.MAX_DELETIONS || "1000", 10);
+const MAX_DELETIONS = parseInt(process.env.MAX_DELETIONS || "25", 10);
 const KEEP_TAG = (process.env.RADARR_KEEP_TAG || "keep").toLowerCase();
-
+ 
 function updateLog(section, entry) {
   let log = {
     timestamp: new Date().toISOString(),
@@ -46,7 +49,7 @@ function updateLog(section, entry) {
     radarrFailures: [],
     removedFromRadarr: [],
   };
-
+ 
   try {
     if (fs.existsSync(LOG_FILE)) {
       const data = fs.readFileSync(LOG_FILE, "utf-8");
@@ -55,22 +58,22 @@ function updateLog(section, entry) {
   } catch (err) {
     console.warn("⚠️ Failed to read log file:", err.message);
   }
-
+ 
   if (!Array.isArray(log[section])) {
     log[section] = [];
   }
-
+ 
   log[section].push(entry);
-
+ 
   try {
     fs.writeFileSync(LOG_FILE, JSON.stringify(log, null, 2));
   } catch (err) {
     console.warn("⚠️ Failed to write to log file:", err.message);
   }
 }
-
+ 
 // ---------- Title matching (second safety net before deleting) ----------
-
+ 
 function normalizeTitle(s) {
   return (s || "")
     .toLowerCase()
@@ -79,14 +82,14 @@ function normalizeTitle(s) {
     .replace(/&/g, "and")
     .replace(/[^a-z0-9]/g, "");
 }
-
+ 
 function titleKeysFromLetterboxdName(name) {
   // "Drunken Master (1978)" -> ["drunkenmaster|1978"], "Heat" -> ["heat"]
   const match = name.match(/^(.*?)\s*\((\d{4})\)\s*$/);
   if (match) return [`${normalizeTitle(match[1])}|${match[2]}`];
   return [normalizeTitle(name)];
 }
-
+ 
 function radarrMovieMatchesTitleKeys(movie, keys) {
   const titles = [movie.title, movie.originalTitle].filter(Boolean);
   return titles.some((t) => {
@@ -94,14 +97,14 @@ function radarrMovieMatchesTitleKeys(movie, keys) {
     return keys.has(`${n}|${movie.year}`) || keys.has(n);
   });
 }
-
+ 
 // ---------- Letterboxd ----------
-
+ 
 async function fetchLetterboxdWatchlist(username) {
   console.log(`\n🎬 Fetching watchlist for ${username}...`);
   const baseUrl = `https://letterboxd.com/${username}/watchlist`;
   const films = [];
-
+ 
   const firstRes = await fetch(`${baseUrl}/`);
   if (!firstRes.ok) {
     throw new Error(`Letterboxd returned ${firstRes.status} for ${username}`);
@@ -109,7 +112,7 @@ async function fetchLetterboxdWatchlist(username) {
   const firstHtml = await firstRes.text();
   const $first = cheerio.load(firstHtml);
   const lastPage = parseInt($first("li.paginate-page").last().text()) || 1;
-
+ 
   for (let page = 1; page <= lastPage; page++) {
     const url = `${baseUrl}/page/${page}/`;
     const res = await fetch(url);
@@ -118,13 +121,13 @@ async function fetchLetterboxdWatchlist(username) {
     }
     const html = await res.text();
     const $ = cheerio.load(html);
-
+ 
     $(
       '.react-component[data-component-class="LazyPoster"][data-item-slug]',
     ).each((_, el) => {
       const name = $(el).attr("data-item-name");
       const slug = $(el).attr("data-item-slug");
-
+ 
       let filmId = null;
       const identifierJson = $(el).attr("data-postered-identifier");
       if (identifierJson) {
@@ -135,22 +138,22 @@ async function fetchLetterboxdWatchlist(username) {
           }
         } catch {}
       }
-
+ 
       if (name && slug) {
         films.push({ name, letterboxdFilmId: filmId, slug });
       }
     });
-
+ 
     console.log(
       `📄 Page ${page}/${lastPage} — ${films.length} movies total so far`,
     );
   }
-
+ 
   return films;
 }
-
+ 
 // ---------- TMDB ----------
-
+ 
 async function getTmdbIdFromLetterboxd(slug) {
   try {
     const res = await fetch(`https://letterboxd.com/film/${slug}/json/`);
@@ -169,7 +172,7 @@ async function getTmdbIdFromLetterboxd(slug) {
   }
   return null;
 }
-
+ 
 async function searchTmdbByTitle(title) {
   const cleanTitle = title.replace(/\s*\(\d{4}\)\s*$/, "").trim();
   const res = await fetch(
@@ -180,7 +183,7 @@ async function searchTmdbByTitle(title) {
   const json = await res.json();
   return json.results?.[0] || null;
 }
-
+ 
 async function getTmdbMovie(film) {
   const tmdbId = await getTmdbIdFromLetterboxd(film.slug);
   if (tmdbId) {
@@ -193,21 +196,30 @@ async function getTmdbMovie(film) {
   }
   return await searchTmdbByTitle(film.name);
 }
-
+ 
 // ---------- Radarr ----------
-
+ 
 async function radarrGetJson(pathname) {
   const res = await fetch(`${RADARR_URL}${pathname}`, {
     headers: { "X-Api-Key": RADARR_API_KEY },
   });
+  const text = await res.text();
   if (!res.ok) {
     throw new Error(
-      `Radarr GET ${pathname} failed: ${res.status} ${await res.text()}`,
+      `Radarr GET ${pathname} failed: ${res.status} ${text.slice(0, 200)}`,
     );
   }
-  return res.json();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      `Radarr GET ${RADARR_URL}${pathname} returned non-JSON (probably a web page). ` +
+        `Check RADARR_URL, including any URL Base set in Radarr. Response starts with: ` +
+        text.slice(0, 120).replace(/\s+/g, " "),
+    );
+  }
 }
-
+ 
 async function addToRadarr(movie) {
   let year;
   if (movie.release_date) {
@@ -225,7 +237,7 @@ async function addToRadarr(movie) {
       searchForMovie: true,
     },
   };
-
+ 
   const res = await fetch(`${RADARR_URL}/api/v3/movie`, {
     method: "POST",
     headers: {
@@ -234,27 +246,27 @@ async function addToRadarr(movie) {
     },
     body: JSON.stringify(payload),
   });
-
+ 
   if (!res.ok) {
     const errorText = await res.text();
-
+ 
     let errorParsed;
     try {
       errorParsed = JSON.parse(errorText);
     } catch {
       errorParsed = null;
     }
-
+ 
     const isDuplicate =
       Array.isArray(errorParsed) &&
       errorParsed.some((e) => e.errorCode === "MovieExistsValidator");
-
+ 
     if (isDuplicate) {
       return;
     }
-
+ 
     console.error(`❌ Failed to add "${movie.title}": ${errorText}`);
-
+ 
     if (!isCi) {
       updateLog("radarrFailures", {
         title: movie.title,
@@ -267,7 +279,7 @@ async function addToRadarr(movie) {
     console.log(`✅ Added "${movie.title}" to Radarr`);
   }
 }
-
+ 
 // Cancels queue items in Radarr AND removes the torrent + partial data from
 // qBittorrent. Deleting a movie alone leaves its download running.
 async function removeQueueItems(queueItems) {
@@ -290,7 +302,7 @@ async function removeQueueItems(queueItems) {
   }
   return removed;
 }
-
+ 
 // Downloads still in the queue that no longer belong to any Radarr movie,
 // e.g. left behind by movies deleted before this cleanup existed.
 async function getOrphanedQueueItems() {
@@ -299,7 +311,7 @@ async function getOrphanedQueueItems() {
   );
   return (queue.records || []).filter((item) => !item.movieId);
 }
-
+ 
 async function removeFromRadarr(movie) {
   // Cancel this movie's active downloads first, while Radarr can still link
   // them to the movie.
@@ -316,22 +328,53 @@ async function removeFromRadarr(movie) {
       `⚠️ Couldn't check downloads for "${movie.title}": ${err.message}`,
     );
   }
-
-  const res = await fetch(
-    `${RADARR_URL}/api/v3/movie/${movie.id}?deleteFiles=true&addImportExclusion=false`,
-    {
-      method: "DELETE",
-      headers: { "X-Api-Key": RADARR_API_KEY },
-    },
-  );
-
-  if (!res.ok) {
+ 
+  // Radarr's database can be busy ("database is locked") while it deletes
+  // files, so retry a few times with a pause instead of giving up.
+  let res;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      res = await fetch(
+        `${RADARR_URL}/api/v3/movie/${movie.id}?deleteFiles=true&addImportExclusion=false`,
+        {
+          method: "DELETE",
+          headers: { "X-Api-Key": RADARR_API_KEY },
+        },
+      );
+    } catch (err) {
+      // Network error or timeout: Radarr may still finish the delete.
+      console.warn(
+        `⚠️ "${movie.title}": ${err.cause?.code || err.message} (attempt ${attempt}/4)`,
+      );
+      res = null;
+    }
+ 
+    if (res && res.ok) break;
+ 
+    if (res) {
+      const text = await res.text();
+      const locked = res.status === 500 && text.includes("database is locked");
+      if (!locked) {
+        console.error(
+          `❌ Failed to remove "${movie.title}": ${res.status} ${text.slice(0, 200)}`,
+        );
+        return false;
+      }
+      console.warn(
+        `⏳ Radarr busy removing "${movie.title}" (attempt ${attempt}/4)`,
+      );
+    }
+ 
+    if (attempt < 4) await sleep(60000);
+  }
+ 
+  if (!res || !res.ok) {
     console.error(
-      `❌ Failed to remove "${movie.title}": ${res.status} ${await res.text()}`,
+      `❌ Gave up removing "${movie.title}" for now; the next run will retry it.`,
     );
     return false;
   }
-
+ 
   console.log(`🗑️ Removed "${movie.title} (${movie.year})" and its files`);
   if (!isCi) {
     updateLog("removedFromRadarr", {
@@ -342,24 +385,25 @@ async function removeFromRadarr(movie) {
   }
   return true;
 }
-
+ 
 // ---------- Main ----------
-
+ 
 (async () => {
   // These throw if Radarr is unreachable, so we never act on partial data.
   const existing = await radarrGetJson("/api/v3/movie");
   const exclusions = await radarrGetJson("/api/v3/exclusions");
   const tags = await radarrGetJson("/api/v3/tag");
-
+ 
   const existingTmdbIds = new Set(existing.map((m) => m.tmdbId));
   const excludedTmdbIds = new Set(exclusions.map((e) => e.tmdbId));
   const keepTagId =
     tags.find((t) => (t.label || "").toLowerCase() === KEEP_TAG)?.id ?? null;
-
+ 
   const watchlistTmdbIds = new Set();
   const watchlistTitleKeys = new Set();
   let watchlistsComplete = true;
-
+  const wouldAdd = [];
+ 
   for (const user of LETTERBOXD_USERS) {
     let films;
     try {
@@ -369,20 +413,20 @@ async function removeFromRadarr(movie) {
       watchlistsComplete = false;
       continue;
     }
-
+ 
     if (films.length === 0) {
       console.warn(`⚠️ Watchlist for ${user} came back empty`);
       watchlistsComplete = false;
       continue;
     }
-
+ 
     for (const film of films) {
       titleKeysFromLetterboxdName(film.name).forEach((k) =>
         watchlistTitleKeys.add(k),
       );
-
+ 
       const movie = await getTmdbMovie(film);
-
+ 
       if (!movie) {
         console.warn(`⚠️ Not found on TMDB: ${film.name}`);
         if (!isCi) {
@@ -390,32 +434,35 @@ async function removeFromRadarr(movie) {
         }
         continue;
       }
-
+ 
       watchlistTmdbIds.add(movie.id);
-
+ 
       if (excludedTmdbIds.has(movie.id)) {
         console.log(`🚫 Skipping (removed on purpose): ${movie.title}`);
         continue;
       }
-
+ 
       if (existingTmdbIds.has(movie.id)) {
         console.log(`⏭️ Already in Radarr: ${movie.title}`);
         continue;
       }
-
+ 
       if (DRY_RUN) {
         console.log(`🧪 DRY RUN: would add "${movie.title}"`);
+        wouldAdd.push(
+          `${movie.title}${movie.release_date ? ` (${movie.release_date.slice(0, 4)})` : ""}`,
+        );
       } else {
         await addToRadarr(movie);
       }
       existingTmdbIds.add(movie.id);
     }
   }
-
+ 
   // ----- Removals -----
-
+ 
   console.log("\n🧹 Checking for movies no longer on any watchlist...");
-
+ 
   if (!watchlistsComplete) {
     console.warn(
       "⚠️ At least one watchlist failed to load, so skipping removals this run.",
@@ -423,9 +470,9 @@ async function removeFromRadarr(movie) {
     console.log("\n✅ Sync complete (adds only).");
     return;
   }
-
+ 
   const candidates = existing.filter((m) => !watchlistTmdbIds.has(m.tmdbId));
-
+ 
   const toRemove = [];
   for (const m of candidates) {
     if (keepTagId !== null && (m.tags || []).includes(keepTagId)) {
@@ -442,7 +489,7 @@ async function removeFromRadarr(movie) {
     }
     toRemove.push(m);
   }
-
+ 
   if (DRY_RUN) {
     console.log(`\n🧪 DRY RUN: would remove ${toRemove.length} movie(s):`);
     toRemove.forEach((m) => console.log(`   - ${m.title} (${m.year})`));
@@ -451,10 +498,40 @@ async function removeFromRadarr(movie) {
       `🧪 DRY RUN: would also cancel ${orphans.length} orphaned download(s):`,
     );
     orphans.forEach((o) => console.log(`   - ${o.title}`));
+ 
+    const section = (heading, items) =>
+      `${heading} (${items.length})\n${"-".repeat(heading.length + String(items.length).length + 3)}\n` +
+      (items.length ? items.map((i) => `  ${i}`).join("\n") : "  (none)") +
+      "\n";
+ 
+    const report = [
+      `Dry run report — ${new Date().toLocaleString()}`,
+      `Watchlists: ${LETTERBOXD_USERS.join(", ")}`,
+      `Radarr currently has ${existing.length} movies`,
+      "",
+      section(
+        "WOULD REMOVE from Radarr + NAS",
+        toRemove.map((m) => `${m.title} (${m.year})`),
+      ),
+      section(
+        "WOULD CANCEL orphaned downloads",
+        orphans.map((o) => o.title),
+      ),
+      section("WOULD ADD to Radarr", wouldAdd),
+      `Deletion limit is ${MAX_DELETIONS}. ` +
+        (toRemove.length > MAX_DELETIONS
+          ? `A real run would REFUSE to delete; set MAX_DELETIONS to at least ${toRemove.length} for the purge run.`
+          : "A real run would go ahead with the removals."),
+      "",
+    ].join("\n");
+ 
+    const reportPath = path.join(__dirname, "dry-run-report.txt");
+    fs.writeFileSync(reportPath, report);
+    console.log(`\n📝 Report written to ${reportPath}`);
     console.log("\n✅ Sync complete (dry run, nothing deleted).");
     return;
   }
-
+ 
   if (toRemove.length > MAX_DELETIONS) {
     console.error(
       `\n🛑 ${toRemove.length} movies would be removed, which is over the limit of ${MAX_DELETIONS}. Deleting nothing.`,
@@ -466,14 +543,15 @@ async function removeFromRadarr(movie) {
     process.exitCode = 1;
     return;
   }
-
+ 
   if (toRemove.length === 0) {
     console.log("No movies to remove.");
   }
   for (const m of toRemove) {
     await removeFromRadarr(m);
+    await sleep(3000); // give Radarr a breather between deletes
   }
-
+ 
   // Clean up downloads whose movie is already gone from Radarr.
   console.log("\n🧹 Checking for orphaned downloads...");
   const orphans = await getOrphanedQueueItems();
@@ -483,7 +561,7 @@ async function removeFromRadarr(movie) {
     const n = await removeQueueItems(orphans);
     console.log(`⛔ Cancelled ${n} orphaned download(s)`);
   }
-
+ 
   console.log("\n✅ Sync complete!");
 })().catch((err) => {
   console.error("❌ Sync failed:", err);
