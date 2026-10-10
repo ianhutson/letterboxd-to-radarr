@@ -29,7 +29,7 @@ const RADARR_ROOT = process.env.RADARR_ROOT;
 
 // Only these watchlists are synced. Anything in Radarr that isn't on one of
 // them gets removed (along with its files), unless protected (see below).
-const LETTERBOXD_USERS = ["ayygux", "yanhut"];
+const LETTERBOXD_USERS = ["ayygux", "yanhut", "vinceguckin"];
 
 // Safety switches
 // DRY_RUN=true        -> log what would be removed, delete nothing
