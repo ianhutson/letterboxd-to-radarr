@@ -1,3 +1,4 @@
 node_modules/
 .env
 sync-log.json
+dry-run.log
