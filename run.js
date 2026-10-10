@@ -268,7 +268,55 @@ async function addToRadarr(movie) {
   }
 }
 
+// Cancels queue items in Radarr AND removes the torrent + partial data from
+// qBittorrent. Deleting a movie alone leaves its download running.
+async function removeQueueItems(queueItems) {
+  let removed = 0;
+  for (const item of queueItems) {
+    const res = await fetch(
+      `${RADARR_URL}/api/v3/queue/${item.id}?removeFromClient=true&blocklist=false`,
+      {
+        method: "DELETE",
+        headers: { "X-Api-Key": RADARR_API_KEY },
+      },
+    );
+    if (res.ok) {
+      removed++;
+    } else {
+      console.error(
+        `❌ Failed to cancel download "${item.title}": ${res.status} ${await res.text()}`,
+      );
+    }
+  }
+  return removed;
+}
+
+// Downloads still in the queue that no longer belong to any Radarr movie,
+// e.g. left behind by movies deleted before this cleanup existed.
+async function getOrphanedQueueItems() {
+  const queue = await radarrGetJson(
+    "/api/v3/queue?pageSize=5000&includeUnknownMovieItems=true",
+  );
+  return (queue.records || []).filter((item) => !item.movieId);
+}
+
 async function removeFromRadarr(movie) {
+  // Cancel this movie's active downloads first, while Radarr can still link
+  // them to the movie.
+  try {
+    const queueItems = await radarrGetJson(
+      `/api/v3/queue/details?movieId=${movie.id}`,
+    );
+    if (queueItems.length > 0) {
+      const n = await removeQueueItems(queueItems);
+      console.log(`   ⛔ Cancelled ${n} download(s) for "${movie.title}"`);
+    }
+  } catch (err) {
+    console.warn(
+      `⚠️ Couldn't check downloads for "${movie.title}": ${err.message}`,
+    );
+  }
+
   const res = await fetch(
     `${RADARR_URL}/api/v3/movie/${movie.id}?deleteFiles=true&addImportExclusion=false`,
     {
@@ -391,15 +439,14 @@ async function removeFromRadarr(movie) {
     toRemove.push(m);
   }
 
-  if (toRemove.length === 0) {
-    console.log("Nothing to remove.");
-    console.log("\n✅ Sync complete!");
-    return;
-  }
-
   if (DRY_RUN) {
     console.log(`\n🧪 DRY RUN: would remove ${toRemove.length} movie(s):`);
     toRemove.forEach((m) => console.log(`   - ${m.title} (${m.year})`));
+    const orphans = await getOrphanedQueueItems();
+    console.log(
+      `🧪 DRY RUN: would also cancel ${orphans.length} orphaned download(s):`,
+    );
+    orphans.forEach((o) => console.log(`   - ${o.title}`));
     console.log("\n✅ Sync complete (dry run, nothing deleted).");
     return;
   }
@@ -416,8 +463,21 @@ async function removeFromRadarr(movie) {
     return;
   }
 
+  if (toRemove.length === 0) {
+    console.log("No movies to remove.");
+  }
   for (const m of toRemove) {
     await removeFromRadarr(m);
+  }
+
+  // Clean up downloads whose movie is already gone from Radarr.
+  console.log("\n🧹 Checking for orphaned downloads...");
+  const orphans = await getOrphanedQueueItems();
+  if (orphans.length === 0) {
+    console.log("No orphaned downloads.");
+  } else {
+    const n = await removeQueueItems(orphans);
+    console.log(`⛔ Cancelled ${n} orphaned download(s)`);
   }
 
   console.log("\n✅ Sync complete!");
