@@ -36,7 +36,7 @@ const LETTERBOXD_USERS = ["ayygux", "yanhut"];
 // MAX_DELETIONS=N     -> refuse to delete if more than N movies would go (default 25)
 // RADARR_KEEP_TAG=xyz -> movies with this Radarr tag are never removed (default "keep")
 const DRY_RUN = process.env.DRY_RUN === "true";
-const MAX_DELETIONS = 2000
+const MAX_DELETIONS = parseInt(process.env.MAX_DELETIONS || "25", 10);
 const KEEP_TAG = (process.env.RADARR_KEEP_TAG || "keep").toLowerCase();
 
 function updateLog(section, entry) {
@@ -403,7 +403,11 @@ async function removeFromRadarr(movie) {
         continue;
       }
 
-      await addToRadarr(movie);
+      if (DRY_RUN) {
+        console.log(`🧪 DRY RUN: would add "${movie.title}"`);
+      } else {
+        await addToRadarr(movie);
+      }
       existingTmdbIds.add(movie.id);
     }
   }
