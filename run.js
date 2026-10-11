@@ -25,6 +25,8 @@ fs.writeFileSync(
 const RADARR_URL = process.env.RADARR_URL;
 const RADARR_API_KEY = process.env.RADARR_API_KEY;
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
+// Optional. If set and it matches one of Radarr's root folders, that one is
+// used. Otherwise the script uses Radarr's first root folder.
 const RADARR_ROOT = process.env.RADARR_ROOT;
 
 // Only these watchlists are synced. Anything in Radarr that isn't on one of
@@ -173,15 +175,32 @@ async function getTmdbIdFromLetterboxd(slug) {
   return null;
 }
  
-async function searchTmdbByTitle(title) {
-  const cleanTitle = title.replace(/\s*\(\d{4}\)\s*$/, "").trim();
+// Fallback when Letterboxd doesn't give us a TMDB ID. Uses the year from the
+// Letterboxd name ("Opening Night (1977)") so a same-titled film from another
+// year isn't picked. If the name has a year and nothing on TMDB matches it
+// (allowing one year either way for release-date differences), it returns
+// null rather than guessing, so the film shows up as "Not found on TMDB".
+async function searchTmdbByTitle(name) {
+  const match = name.match(/^(.*?)\s*\((\d{4})\)\s*$/);
+  const cleanTitle = (match ? match[1] : name).trim();
+  const year = match ? parseInt(match[2], 10) : null;
+
   const res = await fetch(
     `https://api.themoviedb.org/3/search/movie?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(
       cleanTitle,
     )}`,
   );
   const json = await res.json();
-  return json.results?.[0] || null;
+  const results = json.results || [];
+
+  if (!year) return results[0] || null;
+
+  const yearOf = (r) => parseInt((r.release_date || "").slice(0, 4), 10);
+  return (
+    results.find((r) => yearOf(r) === year) ||
+    results.find((r) => Math.abs(yearOf(r) - year) <= 1) ||
+    null
+  );
 }
  
 async function getTmdbMovie(film) {
@@ -219,8 +238,26 @@ async function radarrGetJson(pathname) {
     );
   }
 }
+
+// Picks the root folder to add movies to, straight from Radarr, so a stale
+// RADARR_ROOT secret can't break adds.
+async function getRootFolderPath() {
+  const folders = await radarrGetJson("/api/v3/rootfolder");
+  if (!folders.length) {
+    throw new Error("Radarr has no root folders configured.");
+  }
+  const strip = (p) => (p || "").replace(/\/+$/, "");
+  if (RADARR_ROOT) {
+    const wanted = folders.find((f) => strip(f.path) === strip(RADARR_ROOT));
+    if (wanted) return wanted.path;
+    console.warn(
+      `⚠️ RADARR_ROOT "${RADARR_ROOT}" isn't a Radarr root folder. Using "${folders[0].path}" instead.`,
+    );
+  }
+  return folders[0].path;
+}
  
-async function addToRadarr(movie) {
+async function addToRadarr(movie, rootFolderPath) {
   let year;
   if (movie.release_date) {
     const y = new Date(movie.release_date).getFullYear();
@@ -231,7 +268,7 @@ async function addToRadarr(movie) {
     tmdbId: movie.id,
     year: year,
     qualityProfileId: 1,
-    rootFolderPath: RADARR_ROOT,
+    rootFolderPath,
     monitored: true,
     addOptions: {
       searchForMovie: true,
@@ -393,6 +430,8 @@ async function removeFromRadarr(movie) {
   const existing = await radarrGetJson("/api/v3/movie");
   const exclusions = await radarrGetJson("/api/v3/exclusions");
   const tags = await radarrGetJson("/api/v3/tag");
+  const rootFolderPath = await getRootFolderPath();
+  console.log(`📁 Adding movies to ${rootFolderPath}`);
  
   const existingTmdbIds = new Set(existing.map((m) => m.tmdbId));
   const excludedTmdbIds = new Set(exclusions.map((e) => e.tmdbId));
@@ -453,7 +492,7 @@ async function removeFromRadarr(movie) {
           `${movie.title}${movie.release_date ? ` (${movie.release_date.slice(0, 4)})` : ""}`,
         );
       } else {
-        await addToRadarr(movie);
+        await addToRadarr(movie, rootFolderPath);
       }
       existingTmdbIds.add(movie.id);
     }
