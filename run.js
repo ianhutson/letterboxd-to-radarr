@@ -43,6 +43,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const DRY_RUN = process.env.DRY_RUN === "true";
 const MAX_DELETIONS = parseInt(process.env.MAX_DELETIONS || "25", 10);
 const KEEP_TAG = (process.env.RADARR_KEEP_TAG || "keep").toLowerCase();
+// KEEP_ADDED_SINCE=YYYY-MM-DD -> one-time rescue: movies that aren't on any
+// watchlist but were added to Radarr on/after this date get the keep tag
+// instead of being removed. Meant for Hut Cinema adds made before Hut Cinema
+// tagged its own adds. Leave unset for normal runs.
+const KEEP_ADDED_SINCE = process.env.KEEP_ADDED_SINCE
+  ? new Date(process.env.KEEP_ADDED_SINCE)
+  : null;
+if (KEEP_ADDED_SINCE && isNaN(KEEP_ADDED_SINCE)) {
+  console.error(`❌ KEEP_ADDED_SINCE "${process.env.KEEP_ADDED_SINCE}" isn't a date (use YYYY-MM-DD).`);
+  process.exit(1);
+}
  
 function updateLog(section, entry) {
   let log = {
@@ -237,6 +248,30 @@ async function radarrGetJson(pathname) {
         text.slice(0, 120).replace(/\s+/g, " "),
     );
   }
+}
+
+async function radarrSend(method, pathname, body) {
+  const res = await fetch(`${RADARR_URL}${pathname}`, {
+    method,
+    headers: { "Content-Type": "application/json", "X-Api-Key": RADARR_API_KEY },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`Radarr ${method} ${pathname} failed: ${res.status} ${text.slice(0, 200)}`);
+  }
+  return text ? JSON.parse(text) : null;
+}
+
+// Adds the keep tag (creating it if needed) to the given movies in one call.
+async function tagMoviesKeep(movies, existingTagId) {
+  const tagId =
+    existingTagId ?? (await radarrSend("POST", "/api/v3/tag", { label: KEEP_TAG })).id;
+  await radarrSend("PUT", "/api/v3/movie/editor", {
+    movieIds: movies.map((m) => m.id),
+    tags: [tagId],
+    applyTags: "add",
+  });
 }
 
 // Picks the root folder to add movies to, straight from Radarr, so a stale
@@ -513,9 +548,14 @@ async function removeFromRadarr(movie) {
   const candidates = existing.filter((m) => !watchlistTmdbIds.has(m.tmdbId));
  
   const toRemove = [];
+  const toTag = [];
   for (const m of candidates) {
     if (keepTagId !== null && (m.tags || []).includes(keepTagId)) {
       console.log(`🔒 Keeping (tagged "${KEEP_TAG}"): ${m.title} (${m.year})`);
+      continue;
+    }
+    if (KEEP_ADDED_SINCE && m.added && new Date(m.added) >= KEEP_ADDED_SINCE) {
+      toTag.push(m);
       continue;
     }
     if (radarrMovieMatchesTitleKeys(m, watchlistTitleKeys)) {
@@ -527,6 +567,19 @@ async function removeFromRadarr(movie) {
       continue;
     }
     toRemove.push(m);
+  }
+
+  if (toTag.length) {
+    const since = KEEP_ADDED_SINCE.toISOString().slice(0, 10);
+    if (DRY_RUN) {
+      console.log(`\n🧪 DRY RUN: would tag "${KEEP_TAG}" on ${toTag.length} movie(s) added since ${since}:`);
+      toTag.forEach((m) => console.log(`   + ${m.title} (${m.year})`));
+    } else {
+      // Done before any deletion; if it fails, the run stops and nothing is removed.
+      await tagMoviesKeep(toTag, keepTagId);
+      console.log(`\n🔒 Tagged "${KEEP_TAG}" on ${toTag.length} movie(s) added since ${since}:`);
+      toTag.forEach((m) => console.log(`   + ${m.title} (${m.year})`));
+    }
   }
  
   if (DRY_RUN) {
@@ -551,6 +604,10 @@ async function removeFromRadarr(movie) {
       section(
         "WOULD REMOVE from Radarr + NAS",
         toRemove.map((m) => `${m.title} (${m.year})`),
+      ),
+      section(
+        `WOULD TAG "${KEEP_TAG}" (not on a watchlist, added since ${KEEP_ADDED_SINCE ? KEEP_ADDED_SINCE.toISOString().slice(0, 10) : "n/a"})`,
+        toTag.map((m) => `${m.title} (${m.year}) — added ${(m.added || "").slice(0, 10)}`),
       ),
       section(
         "WOULD CANCEL orphaned downloads",
