@@ -167,6 +167,7 @@ async function fetchLetterboxdWatchlist(username) {
  
 // ---------- TMDB ----------
  
+// Returns { id } for a film, { tv: true } for a TV entry, or null if unknown.
 async function getTmdbIdFromLetterboxd(slug) {
   try {
     const res = await fetch(`https://letterboxd.com/film/${slug}/json/`);
@@ -176,9 +177,23 @@ async function getTmdbIdFromLetterboxd(slug) {
         (l) => l.type === "tmdb" || (l.url && l.url.includes("themoviedb")),
       );
       if (tmdbLink) {
+        if (/\/tv\/\d+/.test(tmdbLink.url)) return { tv: true };
         const match = tmdbLink.url.match(/movie\/(\d+)/);
-        if (match) return parseInt(match[1]);
+        if (match) return { id: parseInt(match[1]) };
       }
+    }
+  } catch (err) {
+    // fall through to the film page
+  }
+  // The film page itself carries the TMDB ID: <body data-tmdb-id="..." data-tmdb-type="movie">
+  try {
+    const res = await fetch(`https://letterboxd.com/film/${slug}/`);
+    if (res.ok) {
+      const html = await res.text();
+      const id = html.match(/data-tmdb-id="(\d+)"/);
+      const type = html.match(/data-tmdb-type="(\w+)"/);
+      if (type && type[1] === "tv") return { tv: true };
+      if (id) return { id: parseInt(id[1]) };
     }
   } catch (err) {
     // fall through to title search
@@ -204,21 +219,31 @@ async function searchTmdbByTitle(name) {
   const json = await res.json();
   const results = json.results || [];
 
-  if (!year) return results[0] || null;
-
-  const yearOf = (r) => parseInt((r.release_date || "").slice(0, 4), 10);
-  return (
-    results.find((r) => yearOf(r) === year) ||
-    results.find((r) => Math.abs(yearOf(r) - year) <= 1) ||
-    null
+  // Only accept a result whose title (or original title) is the same title,
+  // ignoring case and punctuation. A different film that merely contains the
+  // words ("Femme" for "Jeune Femme") is never picked.
+  const wanted = normalizeTitle(cleanTitle);
+  const sameTitle = results.filter(
+    (r) => normalizeTitle(r.title) === wanted || normalizeTitle(r.original_title) === wanted,
   );
+  if (!sameTitle.length) return null;
+  if (!year) return sameTitle[0];
+
+  // Letterboxd and TMDB years can differ by one (festival vs release), so take
+  // the closest year within one, preferring an exact match.
+  const yearOf = (r) => parseInt((r.release_date || "").slice(0, 4), 10);
+  const close = sameTitle
+    .filter((r) => Math.abs(yearOf(r) - year) <= 1)
+    .sort((a, b) => Math.abs(yearOf(a) - year) - Math.abs(yearOf(b) - year));
+  return close[0] || null;
 }
  
 async function getTmdbMovie(film) {
-  const tmdbId = await getTmdbIdFromLetterboxd(film.slug);
-  if (tmdbId) {
+  const found = await getTmdbIdFromLetterboxd(film.slug);
+  if (found && found.tv) return null; // TV series/miniseries: not for Radarr
+  if (found && found.id) {
     const res = await fetch(
-      `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}`,
+      `https://api.themoviedb.org/3/movie/${found.id}?api_key=${TMDB_API_KEY}`,
     );
     if (res.ok) {
       return await res.json();
