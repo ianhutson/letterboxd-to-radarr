@@ -254,11 +254,35 @@ async function getTmdbMovie(film) {
  
 // ---------- Radarr ----------
  
+// Radarr reads are retried when Radarr is busy (Cloudflare 524/502, other 5xx)
+// or the connection drops, waiting 30s, 60s, then 120s. Reads only change
+// nothing, so retrying is always safe.
 async function radarrGetJson(pathname) {
-  const res = await fetch(`${RADARR_URL}${pathname}`, {
-    headers: { "X-Api-Key": RADARR_API_KEY },
-  });
-  const text = await res.text();
+  const waits = [30000, 60000, 120000];
+  for (let attempt = 0; ; attempt++) {
+    let res, text, err;
+    try {
+      res = await fetch(`${RADARR_URL}${pathname}`, {
+        headers: { "X-Api-Key": RADARR_API_KEY },
+      });
+      text = await res.text();
+    } catch (e) {
+      err = e;
+    }
+    const retryable = err || res.status >= 500;
+    if (!retryable || attempt >= waits.length) {
+      if (err) throw err;
+      return parseRadarrJson(pathname, res, text);
+    }
+    const why = err ? err.cause?.code || err.message : `HTTP ${res.status}`;
+    console.warn(
+      `⏳ Radarr GET ${pathname} failed (${why}); retrying in ${waits[attempt] / 1000}s (${attempt + 1}/${waits.length})`,
+    );
+    await sleep(waits[attempt]);
+  }
+}
+
+function parseRadarrJson(pathname, res, text) {
   if (!res.ok) {
     throw new Error(
       `Radarr GET ${pathname} failed: ${res.status} ${text.slice(0, 200)}`,
