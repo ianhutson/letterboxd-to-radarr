@@ -4,6 +4,14 @@ on:
   schedule:
     - cron: "0 4 * * *"
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (report only, delete nothing)"
+        type: boolean
+        default: true
+      max_deletions:
+        description: "MAX_DELETIONS for this run"
+        default: "25"
 
 jobs:
   sync:
@@ -26,3 +34,12 @@ jobs:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           RADARR_ROOT: ${{ secrets.RADARR_ROOT }}
           LETTERBOXD_USERS: ${{ secrets.LETTERBOXD_USERS }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          MAX_DELETIONS: ${{ inputs.max_deletions || '25' }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dry-run-report
+          path: dry-run-report.txt
+          if-no-files-found: ignore
